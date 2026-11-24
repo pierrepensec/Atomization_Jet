@@ -2,8 +2,9 @@
 #include "navier-stokes/centered.h"
 #include "two-phase.h"
 #include "tension.h"
+#include "fractions.h"
 #include "tag.h"
-#include "view.h"
+//#include "view.h"
 
 
 double radius = 1./12.;
@@ -45,6 +46,32 @@ int main (int argc, char * argv[])
   f.sigma = SIGMA;
 
   run();
+}
+
+event filter (i++) {
+  remove_droplets (f, 3);
+}
+
+event log_metrics (t += 0.1) {
+  int n_gouttes = tag (f);
+  
+  double volume = 0., area = 0.;
+  foreach(reduction(+:volume) reduction(+:area)) {
+    volume += f[] * dv(); // Calcul du volume liquide
+    
+    // Calcul de l'aire interfaciale pour les cellules mixtes
+    if (f[] > 1e-6 && f[] < 1. - 1e-6) {
+      coord n = mycs (point, f);
+      double alpha = plane_alpha (f[], n);
+      area += pow(Delta, dimension - 1) * plane_area_center (n, alpha, NULL);
+    }
+  }
+  
+  // D32 = 6 * Volume / Aire
+  double D32 = area > 0. ? 6. * volume / area : 0.;
+  
+  // Écriture des résultats (Niveau, Uemax, Temps, Nb Gouttes, D32)
+  fprintf (stderr, "%d %g %g %d %g\n", maxlevel, uemax, t, n_gouttes, D32);
 }
 
 event init (t = 0) {
@@ -99,7 +126,7 @@ event adapt (i++) {
 
 event snapshot (t = 0.0; t += 2e-2; t <= 3.5) {
   char name[80];
-  sprintf (name, "dump-%04d", (int) round (t/e-2));
+  sprintf (name, "dump-%04d", (int) round (t/2e-2));
   scalar pid[];
   foreach()
     pid[] = fmod(pid()*(npe() + 37), npe());

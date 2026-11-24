@@ -1,22 +1,19 @@
-# Basilisk pulsed jet -- MPI simulation + parallel frame rendering + video
+# Basilisk pulsed jet (2D & 3D Manifold Death) -- MPI simulation + parallel frames + video
 #
-#   make full                      simulate (MPI), render frames, encode video
-#   make full NP=6 LEVEL=10        same, other resolution / rank count
-#   make run | frames | movie      individual stages (each can be re-run alone)
-#   make clean                     remove binaries
-#   make full RUNDIR=/dev/shm/jet  run in RAM (copy jet.mp4 out afterwards)
-#
-# Needs: $BASILISK exported (path to basilisk/src), qcc in PATH, mpicc/mpirun,
-# ImageMagick (convert) for PNG frames, ffmpeg for the video.
+#   make full-2d LEVEL=9 NP=3
+#   make full-3d LEVEL=8 NP=4 HC=0.015625
+#   make full SRC=atomisation_3D_MD.c LEVEL=8 NP=4 UEMAX=0.1 HC=0.015625
+#   make run | frames | movie SRC=...
+#   make clean
 
-SRC     ?= atomisation.c
+SRC     ?= simulation.c
 EXE     ?= $(SRC:.c=)
 POSTSRC ?= post.c
-POST    ?= $(POSTSRC:.c=)
 
-NP      ?= 6
-LEVEL   ?= 15
+NP      ?= 3
+LEVEL   ?= 9
 UEMAX   ?= 0.1
+HC      ?= 0.015625
 JOBS    ?= $(shell nproc)
 FPS     ?= 24
 MPICC   ?= mpicc
@@ -27,9 +24,23 @@ ifndef BASILISK
 $(error BASILISK is not set: export BASILISK=/path/to/basilisk/src)
 endif
 
-# Flags shared by the simulation and the post-processing program
-COMMON  = -O2 -Wall -disable-dimensions -grid=quadtree
-GLLIBS  = -L$(BASILISK)/gl -lglutils -lfb_tiny
+# Bascule automatique 2D (quadtree) / 3D Manifold Death (octree) selon le fichier source
+ifeq ($(SRC),atomisation_3D_MD.c)
+  GRID     ?= octree
+  SIM_ARGS ?= $(LEVEL) $(UEMAX) $(HC)
+  RUNDIR   ?= 3D-run-L$(LEVEL)-np$(NP)-ue$(UEMAX)-HC$(HC)
+else
+  GRID     ?= quadtree
+  SIM_ARGS ?= $(LEVEL) $(UEMAX)
+  RUNDIR   ?= 2D-run-L$(LEVEL)-np$(NP)-ue$(UEMAX)
+endif
+
+# Binaire de rendu distinct selon la dimension pour restaurer correctement les dumps 2D ou 3D
+POST    ?= $(POSTSRC:.c=)_$(GRID)
+
+# Flags partagés par la simulation et le post-traitement
+COMMON  = -O2 -Wall -disable-dimensions -grid=$(GRID)
+GLLIBS  = -L$(BASILISK)/gl -lglutils -lfb_tiny -lgsl -lgslcblas
 
 # Optional profiling: make TRACE=2 (changing flags requires make clean)
 ifdef TRACE
@@ -37,14 +48,11 @@ TRACEFLAG = -DTRACE=$(TRACE)
 endif
 
 # Optional websocket display server: make WS=1
-# (named WS on purpose: DISPLAY is already an X11 environment variable)
 ifdef WS
 WSFLAGS = -DDISPLAY=1 -L$(BASILISK)/wsServer -lws -lpthread
 endif
 
-RUNDIR = run-L$(LEVEL)-np$(NP)-ue$(UEMAX)
-
-.PHONY: all full run frames movie clean clean-frames
+.PHONY: all full full-2d full-3d run frames movie clean clean-frames clean-dump
 
 all: $(EXE) $(POST)
 
@@ -60,11 +68,11 @@ $(POST): $(POSTSRC)
 run: $(EXE)
 	mkdir -p $(RUNDIR)
 	cd $(RUNDIR) && OMP_NUM_THREADS=1 mpirun $(MPIRUN_FLAGS) -np $(NP) \
-	  $(CURDIR)/$(EXE) $(LEVEL) $(UEMAX) 2> log-$(LEVEL)-$(NP) > out-$(LEVEL)-$(NP)
+	  $(CURDIR)/$(EXE) $(SIM_ARGS) 2> log-$(LEVEL)-$(NP) > out-$(LEVEL)-$(NP)
 
 # One serial process per dump, JOBS at a time. Frames newer than their dump are skipped.
 frames: $(POST)
-	@ls $(RUNDIR)/dump-[0-9][0-9][0-9][0-9] >/dev/null 2>&1 || { echo "no dump-XXXX files in $(RUNDIR): does the simulation have the 'frames' dump event?"; exit 1; }
+	@ls $(RUNDIR)/dump-[0-9][0-9][0-9][0-9] >/dev/null 2>&1 || { echo "no dump-XXXX files in $(RUNDIR): does the simulation have the 'snapshot' dump event?"; exit 1; }
 	@command -v convert >/dev/null || \
 	  echo "warning: ImageMagick 'convert' not found, frames may fall back to raw PPM"
 	cd $(RUNDIR) && ls dump-[0-9][0-9][0-9][0-9] | sed 's/^dump-//' | \
@@ -89,10 +97,17 @@ movie:
 
 # Sequential on purpose (safe with make -j)
 full:
-	$(MAKE) run && $(MAKE) frames && $(MAKE) movie && $(MAKE) clean-frames
+	$(MAKE) SRC=$(SRC) run && $(MAKE) SRC=$(SRC) frames && $(MAKE) SRC=$(SRC) movie && $(MAKE) SRC=$(SRC) clean-frames
+
+# Raccourcis directs 2D et 3D
+full-2d:
+	$(MAKE) SRC=simulation.c full
+
+full-3d:
+	$(MAKE) SRC=atomisation_3D_MD.c full
 
 clean:
-	rm -f $(EXE) $(POST) _$(SRC) _$(POSTSRC)
+	rm -f simulation atomisation_3D_MD $(EXE) post_quadtree post_octree _*.c
 
 clean-frames:
 	rm -f $(RUNDIR)/frame-*.png $(RUNDIR)/frame-*.log
